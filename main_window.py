@@ -153,94 +153,154 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
         self.cells = {}
 
-    def on_cell_dropped(self, r, c, value):
+    def on_cell_dropped(self, r, c, value, from_bank):
         # Callback from DropCell
-        self.number_bank.remove_number(value)
+        if from_bank:
+            self.number_bank.remove_number(value)
         self.check_solution()
 
     def on_cell_cleared(self, value):
         self.number_bank.add_number(value)
         self.check_solution()
 
+    def evaluate_expression(self, parts):
+        if not parts:
+            return None
+        
+        try:
+            # Left-to-right evaluation
+            current_val = float(parts[0])
+            
+            i = 1
+            while i < len(parts):
+                op = parts[i]
+                next_val = float(parts[i+1])
+                
+                if op == '+':
+                    current_val += next_val
+                elif op == '-':
+                    current_val -= next_val
+                elif op == '*':
+                    current_val *= next_val
+                elif op == '/':
+                    if next_val == 0:
+                        return None
+                    current_val /= next_val
+                
+                i += 2
+                
+            return current_val
+        except (ValueError, IndexError, TypeError):
+            return None
+
     def check_solution(self):
         if not self.solution_grid:
             return
 
-        # Helper functions to check if row/col is fully filled
-        def is_row_full(r):
-            for c in range(self.solution_grid.size):
-                if self.solution_grid.grid[r][c] is not None:
-                    if (r, c) not in self.cells or self.cells[(r, c)].current_value is None:
-                        return False
-            return True
+        cell_status = {} # (r,c) -> 'neutral', 'valid', 'invalid'
+        # Initialize all mutable cells to neutral
+        for pos, cell in self.cells.items():
+            if cell.acceptDrops():
+                cell_status[pos] = 'neutral'
 
-        def is_col_full(c):
-            for r in range(self.solution_grid.size):
-                if self.solution_grid.grid[r][c] is not None:
-                    if (r, c) not in self.cells or self.cells[(r, c)].current_value is None:
-                        return False
-            return True
-
-        # Pre-calculate full status for efficiency
-        rows_full = [is_row_full(r) for r in range(self.solution_grid.size)]
-        cols_full = [is_col_full(c) for c in range(self.solution_grid.size)]
-
-        all_correct = True
-        all_filled = True
-
-        for r in range(self.solution_grid.size):
-            for c in range(self.solution_grid.size):
-                solution_cell = self.solution_grid.grid[r][c]
-                if solution_cell:
-                    sol_val = solution_cell[0]
+        all_equations_correct = True
+        
+        # Iterate over all equations defined in the solution grid
+        for eq_data in self.solution_grid.equations:
+            eq_obj, start_r, start_c, direction = eq_data
+            dr, dc = direction
+            
+            # Equation length on grid: parts + '=' + result
+            length = len(eq_obj.parts) + 2
+            
+            equation_cells = []
+            lhs_parts = []
+            rhs_val = None
+            is_complete = True
+            
+            for i in range(length):
+                r = start_r + i * dr
+                c = start_c + i * dc
+                
+                if (r, c) not in self.cells:
+                    is_complete = False
+                    break
                     
-                    if (r, c) in self.cells:
-                        cell_widget = self.cells[(r, c)]
-                        user_val = cell_widget.current_value
-                        
-                        # Only check correctness for holes (DropCells that accept drops)
-                        if cell_widget.acceptDrops():
-                            if user_val is not None:
-                                # Check if we should validate (row or col is full)
-                                should_validate = rows_full[r] or cols_full[c]
-                                
-                                if should_validate:
-                                    if int(user_val) == int(sol_val):
-                                        cell_widget.setStyleSheet("""
-                                            QLabel {
-                                                background-color: #90EE90;
-                                                border: 2px solid #228B22;
-                                                border-radius: 5px;
-                                                font-size: 18px;
-                                                color: #000;
-                                                font-weight: bold;
-                                            }
-                                        """)
-                                    else:
-                                        cell_widget.setStyleSheet("""
-                                            QLabel {
-                                                background-color: #FFB6C1;
-                                                border: 2px solid #FF69B4;
-                                                border-radius: 5px;
-                                                font-size: 18px;
-                                                color: #000;
-                                                font-weight: bold;
-                                            }
-                                        """)
-                                        all_correct = False
-                                else:
-                                    # Neutral style (filled but not validated)
-                                    cell_widget.setStyleSheet(cell_widget.filled_style)
-                                    # Even if not validated visually, we track correctness for win condition
-                                    if int(user_val) != int(sol_val):
-                                        all_correct = False
-                            else:
-                                all_filled = False
-                                all_correct = False
-                                # Reset to default empty style
-                                cell_widget.setStyleSheet(cell_widget.default_style)
+                cell = self.cells[(r, c)]
+                val = cell.current_value
+                
+                if val is None:
+                    is_complete = False
+                    break
+                
+                equation_cells.append((r, c))
+                
+                if i < len(eq_obj.parts):
+                    lhs_parts.append(val)
+                elif i == len(eq_obj.parts):
+                    # This is '='
+                    pass
+                elif i == len(eq_obj.parts) + 1:
+                    rhs_val = val
+            
+            if not is_complete:
+                all_equations_correct = False
+                continue
+                
+            # Evaluate
+            calc_res = self.evaluate_expression(lhs_parts)
+            is_correct = False
+            if calc_res is not None and rhs_val is not None:
+                 if abs(calc_res - float(rhs_val)) < 0.001:
+                     is_correct = True
+            
+            if not is_correct:
+                all_equations_correct = False
+            
+            # Update cell statuses
+            for r, c in equation_cells:
+                if (r, c) in cell_status: # Only update mutable cells
+                    if not is_correct:
+                        cell_status[(r, c)] = 'invalid'
+                    else:
+                        # Only mark valid if not already invalid (invalid takes precedence)
+                        if cell_status[(r, c)] != 'invalid':
+                            cell_status[(r, c)] = 'valid'
 
-        if all_filled and all_correct:
+        # Apply styles
+        for (r, c), status in cell_status.items():
+            cell = self.cells[(r, c)]
+            if cell.current_value is None:
+                cell.setStyleSheet(cell.default_style)
+                continue
+                
+            if status == 'invalid':
+                cell.setStyleSheet("""
+                    QLabel {
+                        background-color: #FFB6C1;
+                        border: 2px solid #FF69B4;
+                        border-radius: 5px;
+                        font-size: 18px;
+                        color: #000;
+                        font-weight: bold;
+                    }
+                """)
+            elif status == 'valid':
+                cell.setStyleSheet("""
+                    QLabel {
+                        background-color: #90EE90;
+                        border: 2px solid #228B22;
+                        border-radius: 5px;
+                        font-size: 18px;
+                        color: #000;
+                        font-weight: bold;
+                    }
+                """)
+            else:
+                # Neutral (filled but part of incomplete equation)
+                cell.setStyleSheet(cell.filled_style)
+
+        if all_equations_correct:
             QTimer.singleShot(500, self.handle_win)
 
     def handle_win(self):
